@@ -45,7 +45,7 @@ def _options_list_to_map(options: List[Dict[str, Any]]) -> Dict[str, Dict[str, A
 
 def load_data(file_path: str) -> List[Dict[str, Any]]:
     """
-    Load KINA items from a JSON array (e.g. KINA-899-format-indexed.json).
+    Load KINA items from a JSON array (e.g. KINA-899.json).
 
     Expected fields per item:
     - index: int, global question index (0..N-1)
@@ -181,7 +181,7 @@ if __name__ == "__main__":
     from kina_bench.config import PROJECT_ROOT
     from os.path import join
 
-    sample = join(PROJECT_ROOT, "data", "KINA-899-format-indexed.json")
+    sample = join(PROJECT_ROOT, "data", "KINA-899.json")
     data = load_data(sample)
     for doc in data[:3]:
         messages = get_messages(doc)

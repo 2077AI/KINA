@@ -1,6 +1,6 @@
 # KINA-Benchmark
 
-Tools to run model inference and **Pass@1** scoring on the **KINA** benchmark: multi-discipline questions with **one correct** option among lettered choices **A–J** (as in the public `KINA-899-format-indexed.json` release).
+Tools to run model inference and **Pass@1** scoring on the **KINA** benchmark: multi-discipline questions with **one correct** option among lettered choices **A–J** (as in the public `KINA-899.json` release).
 
 > Scoring reuses [lighteval](https://github.com/huggingface/lighteval) letter-extraction and Pass@*k* metrics (the same multi-choice path used for other letter-style tasks in the library). The **dataset file format** is the indexed JSON described below, not the legacy labeling-platform export.
 
@@ -23,13 +23,15 @@ See the [SGLang documentation](https://github.com/sgl-project/sglang) for detail
 
 ## Data file
 
-1. Place the dataset JSON under **`KINA-Benchmark/data/`** (or symlink it from the monorepo root), using the name expected by `--data_name` (default: `KINA-899-format-indexed` → `data/KINA-899-format-indexed.json`).
+1. Place the dataset JSON under **`KINA-Benchmark/data/`** (or symlink it from the monorepo root), using the name expected by `--data_name` (default: `KINA-899` → `data/KINA-899.json`).
 2. Example (from the parent KINA repo):
 
    ```bash
    mkdir -p data
-   ln -sf ../../data/KINA-899-format-indexed.json data/KINA-899-format-indexed.json
+   ln -sf ../../data/KINA-899.json data/KINA-899.json
    ```
+
+   If your file lives elsewhere or uses another name, point `ln -sf <source> data/KINA-899.json` to that path.
 
 The expected format is a **JSON array** of 899 objects; each object includes at least:
 
@@ -55,7 +57,7 @@ export OPENAI_KEY="your-api-key"
 
 python src/kina_bench/run_openai_chat.py \
     --model_id "gpt-4o" \
-    --data_name "KINA-899-format-indexed" \
+    --data_name "KINA-899" \
     --n_thread 32
 ```
 
@@ -79,7 +81,7 @@ export OPENAI_KEY="EMPTY"
 
 python src/kina_bench/run_openai_chat.py \
     --model_id "Qwen/Qwen3-8B" \
-    --data_name "KINA-899-format-indexed" \
+    --data_name "KINA-899" \
     --n_thread 64
 ```
 
@@ -88,7 +90,7 @@ python src/kina_bench/run_openai_chat.py \
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--model_id` | (required) | Model id passed to the API |
-| `--data_name` | `KINA-899-format-indexed` | Basename of `data/{data_name}.json` (no extension) |
+| `--data_name` | `KINA-899` | Basename of `data/{data_name}.json` (no extension) |
 | `--n_sampling` | `1` | Parallel completions per question: **1, 4, or 8** |
 | `--max_tokens` | `16384` | Max output tokens (or completion budget where applicable) |
 | `--think_mode` | `none` | `none`, `think`, or `nothink` (Qwen-style chat template) |
@@ -104,7 +106,7 @@ python src/kina_bench/run_openai_chat.py \
 ### View aggregated scores
 
 ```bash
-python src/kina_bench/pretty_print.py --data_name KINA-899-format-indexed
+python src/kina_bench/pretty_print.py --data_name KINA-899
 ```
 
 ## Output layout
@@ -135,7 +137,7 @@ List of:
 ```
 KINA-Benchmark/
 ├── data/
-│   └── KINA-899-format-indexed.json   # add or symlink (not committed by default)
+│   └── KINA-899.json                  # add or symlink (not committed by default)
 ├── results/
 │   └── {model_id}/
 │       └── n{n}_tokens{max}/

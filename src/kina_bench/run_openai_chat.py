@@ -114,8 +114,8 @@ async def main():
     parser.add_argument(
         '--data_name',
         type=str,
-        default="KINA-899-format-indexed",
-        help="Dataset JSON basename under data/ (without .json), e.g. KINA-899-format-indexed",
+        default="KINA-899",
+        help="Dataset JSON basename under data/ (without .json), e.g. KINA-899",
     )
     parser.add_argument('--reasoning_effort', type=str, default=None)
     parser.add_argument('--think_mode', type=str, default="none", choices=["none", "think", "nothink"])
