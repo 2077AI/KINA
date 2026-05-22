@@ -1,7 +1,7 @@
 # KINA: Knowledge Index of Noah's Ark Benchmark 🚢
 
 Tools to run model inference and **Pass@1** scoring on the **KINA** benchmark. 
-**KINA** is an 899-item knowledge benchmark across 261 fine-grained disciplines. It provides a highly diagnostic evaluation of frontier LLMs with multi-discipline questions featuring **one correct** option among lettered choices **A–J**.
+**KINA** is an 899-item knowledge benchmark across 261 fine-grained disciplines. It provides a highly diagnostic evaluation of frontier LLMs with multi-discipline questions featuring **one correct** option among lettered choices **A–J** (as in the public [KINA-899.json](https://huggingface.co/datasets/2077AIDataFoundation/KINA) release).
 
 > Scoring reuses [lighteval](https://github.com/huggingface/lighteval) letter-extraction and Pass@*k* metrics (the same multi-choice path used for other letter-style tasks in the library). The **dataset file format** is the indexed JSON described below, not the legacy labeling-platform export.
   
@@ -24,8 +24,9 @@ See the [SGLang documentation](https://github.com/sgl-project/sglang) for detail
 
 ## Data file
 
-1. Place the dataset JSON under **`KINA-Benchmark/data/`** (or symlink it from the monorepo root), using the name expected by `--data_name` (default: `KINA-899` → `data/KINA-899.json`).
-2. Example (from the parent KINA repo):
+1. Download the dataset from [KINA](https://huggingface.co/datasets/2077AIDataFoundation/KINA).
+2. Place the dataset JSON under **`KINA/data/`** (or symlink it from the monorepo root), using the name expected by `--data_name` (default: `KINA-899` → `data/KINA-899.json`).
+3. Example (from the parent KINA repo):
 
    ```bash
    mkdir -p data
