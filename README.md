@@ -1,16 +1,10 @@
-# KINA-Benchmark: Knowledge Index of Noah's Ark Benchmark 🚢
+# KINA: Knowledge Index of Noah's Ark Benchmark 🚢
 
 Tools to run model inference and **Pass@1** scoring on the **KINA** benchmark. 
 **KINA** is an 899-item knowledge benchmark across 261 fine-grained disciplines. It provides a highly diagnostic evaluation of frontier LLMs with multi-discipline questions featuring **one correct** option among lettered choices **A–J**.
 
 > Scoring reuses [lighteval](https://github.com/huggingface/lighteval) letter-extraction and Pass@*k* metrics (the same multi-choice path used for other letter-style tasks in the library). The **dataset file format** is the indexed JSON described below, not the legacy labeling-platform export.
-
-## 🌟 Key Highlights
-
-* **Disciplinary Representativeness (Theorem 1):** Unlike standard scaling-driven designs, KINA casts representativeness as a coverage-style objective over expert-elicited anchors, yielding a $(1-1/e)$ greedy approximation to ensure domain core competencies are truly tested.
-* **Bonus-on-Bar Tournament Review:** Replaces the flat-payment annotation that typically permits "lazy consensus." Our tournament mechanism strictly FOSD-dominates flat payment in review quality, significantly improving dataset rigor.
-* **Highly Diagnostic:** Evaluated on 42 frontier models, KINA reveals that current capability differentiation at the absolute frontier is heavily driven by soft-science content (humanities and social sciences) rather than hard sciences.
-* 
+  
 ## Environment setup
 
 ```bash
@@ -29,7 +23,6 @@ pip install sglang[all]
 See the [SGLang documentation](https://github.com/sgl-project/sglang) for details.
 
 ## Data file
-(Note: To mitigate data contamination, the test split is typically distributed as an encrypted archive. Ensure you are using the authorized KINA-899.json)
 
 1. Place the dataset JSON under **`KINA-Benchmark/data/`** (or symlink it from the monorepo root), using the name expected by `--data_name` (default: `KINA-899` → `data/KINA-899.json`).
 2. Example (from the parent KINA repo):
