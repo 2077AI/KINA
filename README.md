@@ -1,4 +1,5 @@
 # KINA: Knowledge Index of Noah's Ark Benchmark 🚢
+![KINA](images/kina_banner_white.svg)
 
 Tools to run model inference and **Pass@1** scoring on the **KINA** benchmark. 
 **KINA** is an 899-item knowledge benchmark across 261 fine-grained disciplines. It provides a highly diagnostic evaluation of frontier LLMs with multi-discipline questions featuring **one correct** option among lettered choices **A–J** (as in the public [KINA-899.json](https://huggingface.co/datasets/2077AIDataFoundation/KINA) release).
