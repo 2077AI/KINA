@@ -2,21 +2,22 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
-import random
+from dataclasses import dataclass
 
 from os.path import join, dirname
 from typing import Dict
 
-import openai
-from openai import AsyncOpenAI
+from openai import APIConnectionError, AsyncOpenAI, AsyncStream, InternalServerError, RateLimitError
+from openai.types.chat import ChatCompletionChunk
 from tqdm import tqdm
 from tqdm.asyncio import tqdm_asyncio
 
 from kina_bench.config import PROJECT_ROOT
 from dotenv import find_dotenv, load_dotenv
 
-from kina_bench.utils import load_data, get_messages, judge_score, KINA_METRICS
+from kina_bench.utils import load_data, get_messages, judge_score, KINA_SAMPLE_COUNTS
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -26,22 +27,97 @@ logging.basicConfig(
 )
 
 
-async def run_model_by_message(client: AsyncOpenAI, messages, data_id, model, gen_args: Dict, args, timeout: int = 300):
+@dataclass
+class Completion:
+    responses: list[dict[str, str | None]]
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+class RequestRateLimiter:
+    def __init__(self, requests_per_second: float):
+        self.interval = 1 / requests_per_second
+        self.next_start = 0.0
+        self.lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        loop = asyncio.get_running_loop()
+        async with self.lock:
+            await asyncio.sleep(max(0.0, self.next_start - loop.time()))
+            self.next_start = loop.time() + self.interval
+
+
+def reasoning_text(message) -> str | None:
+    return getattr(message, "reasoning", None) or getattr(message, "reasoning_content", None)
+
+
+async def collect_stream(stream: AsyncStream[ChatCompletionChunk], expected_choices: int) -> Completion:
+    content_parts: dict[int, list[str]] = {}
+    reasoning_parts: dict[int, list[str]] = {}
+    finished: set[int] = set()
+    usage = None
+    async with stream:
+        async for chunk in stream:
+            if chunk.usage is not None:
+                usage = chunk.usage
+            for choice in chunk.choices:
+                content_parts.setdefault(choice.index, [])
+                reasoning_parts.setdefault(choice.index, [])
+                if choice.delta is not None:
+                    if choice.delta.content is not None:
+                        content_parts[choice.index].append(choice.delta.content)
+                    reasoning = reasoning_text(choice.delta)
+                    if reasoning is not None:
+                        reasoning_parts[choice.index].append(reasoning)
+                if choice.finish_reason is not None:
+                    finished.add(choice.index)
+
+    if finished != set(range(expected_choices)):
+        raise ConnectionError("Chat stream ended before every choice reported a finish reason")
+
+    return Completion(
+        responses=[
+            {
+                "content": "".join(content_parts[index]) if content_parts[index] else None,
+                "reasoning": "".join(reasoning_parts[index]) if reasoning_parts[index] else None,
+            }
+            for index in range(expected_choices)
+        ],
+        input_tokens=usage.prompt_tokens if usage else 0,
+        output_tokens=usage.completion_tokens if usage else 0,
+    )
+
+
+async def request_completion(client: AsyncOpenAI, messages, model, gen_args: Dict) -> Completion:
+    response = await client.chat.completions.create(model=model, messages=messages, **gen_args)
+    if gen_args.get("stream"):
+        return await collect_stream(response, gen_args["n"])
+
+    usage = response.usage
+    return Completion(
+        responses=[
+            {"content": choice.message.content, "reasoning": reasoning_text(choice.message)}
+            for choice in response.choices or []
+        ],
+        input_tokens=usage.prompt_tokens if usage else 0,
+        output_tokens=usage.completion_tokens if usage else 0,
+    )
+
+
+async def run_model_by_message(client: AsyncOpenAI, messages, data_id, model, gen_args: Dict,
+                               rate_limiter: RequestRateLimiter, timeout: int = 300):
     retry_num, break_flag = 0, False
     responses = None
     while not break_flag:
         try:
+            await rate_limiter.acquire()
             responses = await asyncio.wait_for(
-                client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    **gen_args
-                ),
+                request_completion(client, messages, model, gen_args),
                 timeout=timeout
             )
             break_flag = True
 
-        except (asyncio.TimeoutError, ConnectionError) as e:
+        except (asyncio.TimeoutError, ConnectionError, APIConnectionError, RateLimitError, InternalServerError) as e:
             logger.error(f"Network exception occurred for {data_id}: {e}")
 
         except Exception as e:
@@ -69,43 +145,33 @@ async def run_model_by_message(client: AsyncOpenAI, messages, data_id, model, ge
     return responses
 
 
-async def process_item(client: AsyncOpenAI, doc, args) -> Dict:
+async def process_item(client: AsyncOpenAI, doc, args, rate_limiter: RequestRateLimiter) -> Dict:
     messages = get_messages(doc)
 
-    max_tokens = args.max_tokens
-    if args.model_id in ["gpt-4o", "o1"]:
-        max_tokens = min(args.max_tokens, 16384)
-    if args.model_id in ["o3", "o1", "o4-mini", "gpt-5-mini", "gpt-5", "gpt-5-nano"]:
-        gen_args = dict(max_completion_tokens=max_tokens)
-    else:
-        gen_args = dict(max_tokens=max_tokens)
+    gen_args = {args.token_field: args.token_limit, "n": args.n_sampling}
+    if args.stream:
+        gen_args.update(stream=True, stream_options={"include_usage": True})
 
-    gen_args["n"] = args.n_sampling
-    if args.reasoning_effort is not None:
-        gen_args["reasoning_effort"] = args.reasoning_effort
-
-    if args.think_mode == "think":
-        gen_args["extra_body"] = {"chat_template_kwargs": {"enable_thinking": True}}
-    elif args.think_mode == "nothink":
-        gen_args["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
-
-    responses = await run_model_by_message(
-        client=client, messages=messages, data_id=doc["id"], model=args.model_id, gen_args=gen_args, args=args,
-        timeout=args.timeout
+    completion = await run_model_by_message(
+        client=client, messages=messages, data_id=doc["id"], model=args.model_id, gen_args=gen_args,
+        rate_limiter=rate_limiter, timeout=args.timeout
     )
+    responses = completion.responses if completion else []
+    missing = max(0, args.n_sampling - len(responses))
 
     return dict(
         id=doc["id"],
         metadata=doc,
         request=json.dumps(messages, ensure_ascii=False),
-        responses=responses,
+        responses=responses + [{"content": None, "reasoning": None} for _ in range(missing)],
+        total_input_tokens=completion.input_tokens if completion else 0,
+        total_output_tokens=completion.output_tokens if completion else 0,
     )
 
 
-async def process_with_semaphore(client, data_item, args, semaphore):
+async def process_with_semaphore(client, data_item, args, semaphore, rate_limiter):
     async with semaphore:
-        await asyncio.sleep(random.uniform(0.1, 0.5))
-        return await process_item(client, data_item, args)
+        return await process_item(client, data_item, args, rate_limiter)
 
 
 async def main():
@@ -117,38 +183,38 @@ async def main():
         default="KINA-899",
         help="Dataset JSON basename under data/ (without .json), e.g. KINA-899",
     )
-    parser.add_argument('--reasoning_effort', type=str, default=None)
-    parser.add_argument('--think_mode', type=str, default="none", choices=["none", "think", "nothink"])
     parser.add_argument('--n_sampling', type=int, default=1)
-    parser.add_argument('--max_tokens', type=int, default=16384)
+    token_options = parser.add_mutually_exclusive_group()
+    token_options.add_argument('--max_tokens', type=int, help="Send max_tokens (default: 16384)")
+    token_options.add_argument('--max_completion_tokens', type=int, help="Send max_completion_tokens instead")
+    parser.add_argument('--stream', action='store_true', help="Stream and collect completions before scoring")
     parser.add_argument('--overwrite', action='store_true')
     parser.add_argument('--skip_inference', action='store_true')
     parser.add_argument("--n_thread", type=int, default=1)
+    parser.add_argument("--requests_per_second", type=float, default=1.0,
+                        help="Maximum request starts per second, including retries (default: 1)")
     parser.add_argument("--timeout", type=int, default=300, help="Timeout in seconds for each API request (default: 300)")
     parser.add_argument("--limit", type=int, default=None, help="Limit the number of data samples for debugging")
     args = parser.parse_args()
-
-    assert args.think_mode in ["none", "think", "nothink"], args.think_mode
-    assert args.n_sampling in KINA_METRICS, (
-        f"n_sampling={args.n_sampling} is not supported. "
-        f"Supported values are: {list(KINA_METRICS.keys())}."
-    )
-
-    if "gpt-5" in args.model_id:
-        assert args.think_mode == "none", "--think_mode cannot be set for gpt-5 series"
-        if args.reasoning_effort is None:
-            logger.info(f"reasoning_effort is default to be medium for {args.model_id}")
-            args.reasoning_effort = "medium"
+    args.token_field = "max_completion_tokens" if args.max_completion_tokens is not None else "max_tokens"
+    args.token_limit = getattr(args, args.token_field)
+    if args.token_limit is None:
+        args.token_limit = 16384
+    if args.n_sampling not in KINA_SAMPLE_COUNTS:
+        parser.error(f"--n_sampling must be one of {list(KINA_SAMPLE_COUNTS)}")
+    if min(args.token_limit, args.n_thread, args.timeout) <= 0 or (args.limit is not None and args.limit <= 0):
+        parser.error("Token limit, --n_thread, --timeout and --limit must be positive")
+    if not math.isfinite(args.requests_per_second) or args.requests_per_second <= 0:
+        parser.error("--requests_per_second must be finite and positive")
 
     reformat_model_id = args.model_id.replace('/', '--')
-    if args.reasoning_effort is not None:
-        reformat_model_id += f"-{args.reasoning_effort}"
-
-    if args.think_mode != "none":
-        reformat_model_id += f"-{args.think_mode}"
+    transport = "stream" if args.stream else "json"
+    generation = f"n{args.n_sampling}_tokens{args.token_limit}_{args.token_field}_{transport}"
+    if args.limit is not None:
+        generation += f"_limit{args.limit}"
 
     result_save_path = join(
-        PROJECT_ROOT, "results", reformat_model_id, f"n{args.n_sampling}_tokens{args.max_tokens}",
+        PROJECT_ROOT, "results", reformat_model_id, generation,
         f"{args.data_name}.jsonl"
     )
     os.makedirs(dirname(result_save_path), exist_ok=True)
@@ -172,104 +238,30 @@ async def main():
     else:
         logger.info(f"Start from scratch")
 
-    env_ok = load_dotenv(find_dotenv(usecwd=True), override=False)
-    if not env_ok:
-        logger.warning("No .env found; using existing environment only.")
-    else:
-        logger.info("Successfully load .env!")
-
-    openai_base_url = os.environ.get("OPENAI_BASE")
-    openai_api_key = os.environ.get("OPENAI_KEY")
-    client = AsyncOpenAI(base_url=openai_base_url, api_key=openai_api_key)
-    logger.info(f"AsyncOpenAI client created by base_url={openai_base_url} and api_key={openai_api_key[:10]}...{openai_api_key[-10:]}")
-
-    # Poll until the inference server is ready.
-    # This is useful when running a local server (e.g., SGLang, vLLM) that takes time
-    # to initialize, especially with large models or DeepGEMM warmup.
-    # For commercial APIs (OpenAI, OpenRouter, etc.), this check passes immediately.
-    max_wait, interval = 1200, 10
-    for elapsed in range(0, max_wait, interval):
-        try:
-            page = await client.models.list()
-            logger.info(f"Server is ready (waited {elapsed}s)")
-            break
-        except (openai.APIConnectionError, ConnectionError):
-            logger.info(f"Server not ready yet, retrying in {interval}s... ({elapsed}/{max_wait}s)")
-            await asyncio.sleep(interval)
-    else:
-        raise RuntimeError(f"Server did not become ready within {max_wait}s")
-
     data = load_data(file_path=join(PROJECT_ROOT, "data", f"{args.data_name}.json"))
-    total_data_ids = [doc["id"] for doc in data]
-    total_data_ids.sort()
-
-    data = [doc for doc in data if doc["id"] not in finish_ids]
     if args.limit is not None:
-        remain = max(0, args.limit - len(finish_ids))
-        data = data[:remain]
-        logger.info(f"Debug mode: limiting to {args.limit} total samples ({len(finish_ids)} finished, {len(data)} remaining)")
-    if len(data) > 0 and not args.skip_inference:
-        try:
-            tasks = []
+        data = data[:args.limit]
+    total_data_ids = [doc["id"] for doc in data]
+    data = [doc for doc in data if doc["id"] not in finish_ids]
+    if data and not args.skip_inference:
+        load_dotenv(find_dotenv(usecwd=True), override=False)
+        async with AsyncOpenAI(base_url=os.environ.get("OPENAI_BASE"), api_key=os.environ.get("OPENAI_KEY"),
+                               max_retries=0) as client:
             semaphore = asyncio.Semaphore(args.n_thread)
-            for data_item in data:
-                tasks.append(
-                    process_with_semaphore(
-                        client=client,
-                        data_item=data_item,
-                        args=args,
-                        semaphore=semaphore
-                    )
-                )
-
-            with open(result_save_path, "w" if len(finish_ids) == 0 else "a") as f:
-                for task in tqdm_asyncio.as_completed(tasks, total=len(tasks), desc="Inference"):
-                    ret_dict = await task
-
-                    dump_dict = {
-                        "id": ret_dict["id"],
-                        "request": ret_dict["request"],
-                        "responses": [],
-                        "metadata": ret_dict["metadata"],
-                        "total_input_tokens": 0,
-                        "total_output_tokens": 0,
-                    }
-
-                    if ret_dict["responses"] is not None and getattr(ret_dict["responses"], "choices", None) is not None:
-                        for single_response in ret_dict["responses"].choices:
-                            try:
-                                msg_content = single_response.message.content
-                                msg_reasoning = None
-                                for key in ["reasoning", "reasoning_content"]:
-                                    if hasattr(single_response.message, key):
-                                        msg_reasoning = getattr(single_response.message, key)
-                                        break
-                            except AttributeError:
-                                msg_content = None
-                                msg_reasoning = None
-
-                            dump_dict["responses"].append(dict(content=msg_content, reasoning=msg_reasoning))
-
-                        dump_dict["total_input_tokens"] += ret_dict["responses"].usage.prompt_tokens
-                        dump_dict["total_output_tokens"] += ret_dict["responses"].usage.completion_tokens
-
-                        if len(dump_dict["responses"]) < args.n_sampling:
-                            remain_num = args.n_sampling - len(dump_dict["responses"])
-                            dump_dict["responses"].extend([dict(content=None, reasoning=None)] * remain_num)
-
-                    else:
-                        dump_dict["responses"] = [dict(content=None, reasoning=None)] * args.n_sampling
-
-                    f.write(json.dumps(dump_dict, ensure_ascii=False) + "\n")
-                    f.flush()
-
-        finally:
-            if client and hasattr(client, 'close'):
-                await client.close()
-
-            for task in asyncio.all_tasks(asyncio.get_running_loop()):
-                if task is not asyncio.current_task() and not task.done():
+            rate_limiter = RequestRateLimiter(args.requests_per_second)
+            tasks = [
+                asyncio.create_task(process_with_semaphore(client, doc, args, semaphore, rate_limiter))
+                for doc in data
+            ]
+            try:
+                with open(result_save_path, "a" if finish_ids else "w", encoding="utf-8") as f:
+                    for task in tqdm_asyncio.as_completed(tasks, total=len(tasks), desc="Inference"):
+                        f.write(json.dumps(await task, ensure_ascii=False) + "\n")
+                        f.flush()
+            finally:
+                for task in tasks:
                     task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     if not os.path.exists(result_save_path):
         logger.info("No result file found, exiting")
@@ -310,16 +302,11 @@ async def main():
         return
 
     final_data = []
-    for doc in tqdm(finished_data, desc="lighteval evaluation"):
+    for doc in tqdm(finished_data, desc="KINA scoring"):
         doc_id = doc["id"]
         gt = doc["metadata"]["ground_truth"]
 
-        responses = []
-        for resp in doc["responses"]:
-            if resp.get("content") is not None:
-                responses.append(resp["content"])
-            else:
-                responses.append(resp["reasoning"])
+        responses = [resp.get("content") or "" for resp in doc["responses"]]
 
         score_dict = judge_score(metadata_doc=doc["metadata"], responses=responses)
 

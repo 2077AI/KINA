@@ -4,7 +4,10 @@
 Tools to run model inference and **Pass@1** scoring on the **KINA** benchmark. 
 **KINA** is an 899-item knowledge benchmark across 261 fine-grained disciplines. It provides a highly diagnostic evaluation of frontier LLMs with multi-discipline questions featuring **one correct** option among lettered choices **A–J** (as in the public [KINA.json](https://huggingface.co/datasets/2077AIDataFoundation/KINA) release).
 
-> Scoring reuses [lighteval](https://github.com/huggingface/lighteval) letter-extraction and Pass@*k* metrics (the same multi-choice path used for other letter-style tasks in the library). The **dataset file format** is the indexed JSON described below, not the legacy labeling-platform export.
+Scoring reads the last non-empty line of the answer for `Answer: X`, where
+`X` is one listed option letter. Reasoning text, abstentions, and ambiguous
+selections cannot supply a final answer. Each sample counts once toward the
+question's Pass@1 score.
   
 ## Environment setup
 
@@ -26,7 +29,7 @@ See the [SGLang documentation](https://github.com/sgl-project/sglang) for detail
 ## Data file
 
 1. Download the dataset from [KINA](https://huggingface.co/datasets/2077AIDataFoundation/KINA).
-2. Place the dataset JSON under **`KINA/data/`** (or symlink it from the monorepo root), using the name expected by `--data_name` (default: `KINA` → `data/KINA.json`).
+2. Place the dataset JSON under **`KINA/data/`**. For `data/KINA.json`, pass `--data_name KINA`. The CLI defaults to `data/KINA-899.json`.
 3. Example (from the parent KINA repo):
 
    ```bash
@@ -52,7 +55,7 @@ Internal runtime representation maps `discipline` → `metadata.category`, `ques
 
 ## Usage
 
-### Commercial API (OpenAI, OpenRouter, etc.)
+### OpenAI-compatible Chat Completions
 
 ```bash
 export OPENAI_BASE="https://api.openai.com/v1"   # or https://openrouter.ai/api/v1
@@ -65,6 +68,22 @@ python src/kina_bench/run_openai_chat.py \
 ```
 
 You can also use a `.env` in the project root (see `.env.example`).
+
+To run a small streaming smoke test with an endpoint that expects
+`max_completion_tokens`:
+
+```bash
+python -m kina_bench.run_openai_chat \
+    --model_id "your-model-id" \
+    --data_name KINA \
+    --limit 3 --stream --max_completion_tokens 16384 --timeout 300
+```
+
+Use `--max_tokens` instead for endpoints that expect that field. These options
+are mutually exclusive. Omitting both sends `max_tokens: 16384` for every
+model. The runner uses the endpoint defaults for reasoning and sampling
+settings such as temperature and top-p. Use `--n_sampling 1` for endpoints that
+accept only one completion per request.
 
 ### Local OpenAI-compatible server (e.g. SGLang)
 
@@ -93,18 +112,27 @@ python src/kina_bench/run_openai_chat.py \
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--model_id` | (required) | Model id passed to the API |
-| `--data_name` | `KINA` | Basename of `data/{data_name}.json` (no extension) |
+| `--data_name` | `KINA-899` | Basename of `data/{data_name}.json` (no extension) |
 | `--n_sampling` | `1` | Parallel completions per question: **1, 4, or 8** |
-| `--max_tokens` | `16384` | Max output tokens (or completion budget where applicable) |
-| `--think_mode` | `none` | `none`, `think`, or `nothink` (Qwen-style chat template) |
-| `--reasoning_effort` | `None` | For o1 / GPT-5 family: `low`, `medium`, `high` |
+| `--max_tokens` | `16384` | Send the budget in the `max_tokens` field |
+| `--max_completion_tokens` | unset | Send the budget in the `max_completion_tokens` field instead |
+| `--stream` | off | Read Chat Completions chunks and collect each answer before scoring |
 | `--n_thread` | `1` | Concurrent requests |
+| `--requests_per_second` | `1` | Maximum request starts per second for this CLI process, including retries. Accepts positive decimal values. |
 | `--overwrite` | `False` | Overwrite an existing `jsonl` from scratch |
-| `--timeout` | `300` | Per-request timeout (seconds) |
-| `--limit` | `None` | Cap how many *remaining* items to run (debug) |
-| `--skip_inference` | `False` | Skip API calls; only evaluate existing `jsonl` if complete |
+| `--timeout` | `300` | Deadline per attempt in seconds, including reading the response stream |
+| `--limit` | unset | Score the first N questions in a separate smoke run |
+| `--skip_inference` | off | Score completed items from an existing JSONL locally |
 
-> **`--skip_inference`**: If some items failed in inference, post-processing (aggregate JSON) is skipped until the set is complete. Re-run the same command to resume, or use `--skip_inference` to force scoring on whatever finished.
+If inference fails for some items, re-run the same command to resume. To score
+the completed items immediately, add `--skip_inference` and keep the same
+model, dataset, sampling, token and stream options. Include the same
+`--limit` if the original run was limited.
+
+For example, `--n_thread 20 --requests_per_second 1` starts the first request
+immediately and waits at least one second between starts. Up to 20 requests can
+be in flight. When all slots are busy, the next request waits for a slot and for
+the start interval to elapse.
 
 ### View aggregated scores
 
@@ -114,11 +142,17 @@ python src/kina_bench/pretty_print.py --data_name KINA
 
 ## Output layout
 
-### Intermediate: `results/{model_id}/n{n}_tokens{max}/{data_name}.jsonl`
+New runs write to `results/{model_id}/{generation}/`. The generation folder
+includes the sample count, token value, token field, response mode and optional
+question limit. For example, `n1_tokens16384_max_completion_tokens_stream_limit3`.
+This keeps old and new runs, streaming and JSON runs, and limited and full runs
+in separate folders. `pretty_print.py` can still read existing scored files.
+
+### Intermediate: `{data_name}.jsonl`
 
 One JSON object per line: `id` (question index), `request`, `responses` (list of `content` / `reasoning`), `metadata` (full parsed row), token usage.
 
-### Final: `results/{model_id}/n{n}_tokens{max}/{data_name}.json`
+### Final: `{data_name}.json`
 
 List of:
 
@@ -126,14 +160,17 @@ List of:
 {
     "id": 0,
     "score": 0.75,
-    "extracted_predictions": [["A", "A"], ["B", "B"]],
+    "extracted_predictions": [["A"], ["B"], ["A"], ["A"]],
     "gt": "A"
 }
 ```
 
 - `score`: Pass@1 in `[0, 1]`
-- `extracted_predictions`: one list of extracted letters per parallel sample
+- `extracted_predictions`: one list per sample, containing its final letter or empty if none was submitted
 - `gt`: `correct_answer` from the dataset
+
+To apply this scoring rule to existing raw responses, rerun with the original
+options and `--skip_inference`. This rewrites the scored JSON from the saved JSONL.
 
 ## Repository layout
 
@@ -143,7 +180,7 @@ KINA-Benchmark/
 │   └── KINA.json                  # add or symlink (not committed by default)
 ├── results/
 │   └── {model_id}/
-│       └── n{n}_tokens{max}/
+│       └── {generation}/
 │           ├── {data_name}.jsonl
 │           └── {data_name}.json
 ├── src/
