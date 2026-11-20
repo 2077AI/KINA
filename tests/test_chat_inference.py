@@ -38,7 +38,6 @@ class FinalAnswerScoringTest(unittest.TestCase):
 class ChatHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        self.server.request_start_times.append(time.monotonic())
         self.server.requests.append((self.path, request))
         if request.get("stream"):
             count = request["n"]
@@ -87,7 +86,6 @@ class ChatInferenceTest(unittest.TestCase):
     def setUp(self):
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), ChatHandler)
         self.server.requests = []
-        self.server.request_start_times = []
         self.server.stall_first_stream = False
         self.server.release_response = threading.Event()
         thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -151,9 +149,18 @@ class ChatInferenceTest(unittest.TestCase):
         self.assertAlmostEqual(json.loads(scores.read_text())[0]["score"], 0.25)
 
     def test_default_request_rate_spaces_starts_at_high_concurrency(self):
-        self.run_cli("--limit", "2", "--n_thread", "20")
-        first, second = self.server.request_start_times
-        self.assertGreaterEqual(second - first, 0.95)
+        starts = []
+        request_completion = runner.request_completion
+
+        async def record_start(*args, **kwargs):
+            starts.append(time.monotonic())
+            return await request_completion(*args, **kwargs)
+
+        with patch.object(runner, "request_completion", record_start):
+            self.run_cli("--limit", "2", "--n_thread", "20")
+        first, second = starts
+        self.assertGreaterEqual(second - first, 0.99)
+        self.assertEqual(len(self.server.requests), 2)
 
     def test_incomplete_stream_is_rejected(self):
         async def request():
