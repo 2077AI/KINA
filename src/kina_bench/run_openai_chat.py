@@ -2,14 +2,14 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
-import random
 from dataclasses import dataclass
 
 from os.path import join, dirname
 from typing import Dict
 
-from openai import AsyncOpenAI, AsyncStream
+from openai import APIConnectionError, AsyncOpenAI, AsyncStream, InternalServerError, RateLimitError
 from openai.types.chat import ChatCompletionChunk
 from tqdm import tqdm
 from tqdm.asyncio import tqdm_asyncio
@@ -32,6 +32,19 @@ class Completion:
     responses: list[dict[str, str | None]]
     input_tokens: int = 0
     output_tokens: int = 0
+
+
+class RequestRateLimiter:
+    def __init__(self, requests_per_second: float):
+        self.interval = 1 / requests_per_second
+        self.next_start = 0.0
+        self.lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        loop = asyncio.get_running_loop()
+        async with self.lock:
+            await asyncio.sleep(max(0.0, self.next_start - loop.time()))
+            self.next_start = loop.time() + self.interval
 
 
 def reasoning_text(message) -> str | None:
@@ -91,18 +104,20 @@ async def request_completion(client: AsyncOpenAI, messages, model, gen_args: Dic
     )
 
 
-async def run_model_by_message(client: AsyncOpenAI, messages, data_id, model, gen_args: Dict, timeout: int = 300):
+async def run_model_by_message(client: AsyncOpenAI, messages, data_id, model, gen_args: Dict,
+                               rate_limiter: RequestRateLimiter, timeout: int = 300):
     retry_num, break_flag = 0, False
     responses = None
     while not break_flag:
         try:
+            await rate_limiter.acquire()
             responses = await asyncio.wait_for(
                 request_completion(client, messages, model, gen_args),
                 timeout=timeout
             )
             break_flag = True
 
-        except (asyncio.TimeoutError, ConnectionError) as e:
+        except (asyncio.TimeoutError, ConnectionError, APIConnectionError, RateLimitError, InternalServerError) as e:
             logger.error(f"Network exception occurred for {data_id}: {e}")
 
         except Exception as e:
@@ -130,7 +145,7 @@ async def run_model_by_message(client: AsyncOpenAI, messages, data_id, model, ge
     return responses
 
 
-async def process_item(client: AsyncOpenAI, doc, args) -> Dict:
+async def process_item(client: AsyncOpenAI, doc, args, rate_limiter: RequestRateLimiter) -> Dict:
     messages = get_messages(doc)
 
     gen_args = {args.token_field: args.token_limit, "n": args.n_sampling}
@@ -139,7 +154,7 @@ async def process_item(client: AsyncOpenAI, doc, args) -> Dict:
 
     completion = await run_model_by_message(
         client=client, messages=messages, data_id=doc["id"], model=args.model_id, gen_args=gen_args,
-        timeout=args.timeout
+        rate_limiter=rate_limiter, timeout=args.timeout
     )
     responses = completion.responses if completion else []
     missing = max(0, args.n_sampling - len(responses))
@@ -154,10 +169,9 @@ async def process_item(client: AsyncOpenAI, doc, args) -> Dict:
     )
 
 
-async def process_with_semaphore(client, data_item, args, semaphore):
+async def process_with_semaphore(client, data_item, args, semaphore, rate_limiter):
     async with semaphore:
-        await asyncio.sleep(random.uniform(0.1, 0.5))
-        return await process_item(client, data_item, args)
+        return await process_item(client, data_item, args, rate_limiter)
 
 
 async def main():
@@ -177,6 +191,8 @@ async def main():
     parser.add_argument('--overwrite', action='store_true')
     parser.add_argument('--skip_inference', action='store_true')
     parser.add_argument("--n_thread", type=int, default=1)
+    parser.add_argument("--requests_per_second", type=float, default=1.0,
+                        help="Maximum request starts per second, including retries (default: 1)")
     parser.add_argument("--timeout", type=int, default=300, help="Timeout in seconds for each API request (default: 300)")
     parser.add_argument("--limit", type=int, default=None, help="Limit the number of data samples for debugging")
     args = parser.parse_args()
@@ -188,6 +204,8 @@ async def main():
         parser.error(f"--n_sampling must be one of {sorted(KINA_METRICS)}")
     if min(args.token_limit, args.n_thread, args.timeout) <= 0 or (args.limit is not None and args.limit <= 0):
         parser.error("Token limit, --n_thread, --timeout and --limit must be positive")
+    if not math.isfinite(args.requests_per_second) or args.requests_per_second <= 0:
+        parser.error("--requests_per_second must be finite and positive")
 
     reformat_model_id = args.model_id.replace('/', '--')
     transport = "stream" if args.stream else "json"
@@ -227,10 +245,12 @@ async def main():
     data = [doc for doc in data if doc["id"] not in finish_ids]
     if data and not args.skip_inference:
         load_dotenv(find_dotenv(usecwd=True), override=False)
-        async with AsyncOpenAI(base_url=os.environ.get("OPENAI_BASE"), api_key=os.environ.get("OPENAI_KEY")) as client:
+        async with AsyncOpenAI(base_url=os.environ.get("OPENAI_BASE"), api_key=os.environ.get("OPENAI_KEY"),
+                               max_retries=0) as client:
             semaphore = asyncio.Semaphore(args.n_thread)
+            rate_limiter = RequestRateLimiter(args.requests_per_second)
             tasks = [
-                asyncio.create_task(process_with_semaphore(client, doc, args, semaphore))
+                asyncio.create_task(process_with_semaphore(client, doc, args, semaphore, rate_limiter))
                 for doc in data
             ]
             try:

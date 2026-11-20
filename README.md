@@ -115,6 +115,7 @@ python src/kina_bench/run_openai_chat.py \
 | `--max_completion_tokens` | unset | Send the budget in the `max_completion_tokens` field instead |
 | `--stream` | off | Read Chat Completions chunks and collect each answer before scoring |
 | `--n_thread` | `1` | Concurrent requests |
+| `--requests_per_second` | `1` | Maximum request starts per second for this CLI process, including retries. Accepts positive decimal values. |
 | `--overwrite` | `False` | Overwrite an existing `jsonl` from scratch |
 | `--timeout` | `300` | Deadline per attempt in seconds, including reading the response stream |
 | `--limit` | unset | Score the first N questions in a separate smoke run |
@@ -124,6 +125,11 @@ If inference fails for some items, re-run the same command to resume. To score
 the completed items immediately, add `--skip_inference` and keep the same
 model, dataset, sampling, token and stream options. Include the same
 `--limit` if the original run was limited.
+
+For example, `--n_thread 20 --requests_per_second 1` starts the first request
+immediately and waits at least one second between starts. Up to 20 requests can
+be in flight. When all slots are busy, the next request waits for a slot and for
+the start interval to elapse.
 
 ### View aggregated scores
 
