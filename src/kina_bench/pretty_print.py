@@ -61,7 +61,7 @@ def main():
         empty_pred_num = 0
         for doc in result:
             # extracted_predictions format: [[preds_for_resp1], [preds_for_resp2], ...]
-            # e.g. when n_sampling=4: [['A', 'A'], ['B', 'B'], ['A', 'A'], ['C', 'C']]
+            # e.g. when n_sampling=4: [['A'], ['B'], ['A'], []]
             extracted_preds = doc["extracted_predictions"]
 
             # Verify: score > 0 if and only if gt appears in any response's extraction results

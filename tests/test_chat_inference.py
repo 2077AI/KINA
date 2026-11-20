@@ -13,6 +13,26 @@ from unittest.mock import patch
 from openai import AsyncOpenAI
 
 from kina_bench import run_openai_chat as runner
+from kina_bench.utils import judge_score
+
+
+class FinalAnswerScoringTest(unittest.TestCase):
+    def test_only_explicit_final_choices_count(self):
+        doc = {"options": {"A": {}, "B": {}}, "ground_truth": "A"}
+        result = judge_score(doc, [
+            "A valid answer letter cannot be assigned.\n\nAnswer: None of A–J",
+            "Answer: A\n\nNo listed option is valid.",
+            "**Answer: A**\n",
+            "Answer: B",
+        ])
+        self.assertEqual(result, {"score": 0.25, "extracted_predictions": [[], [], ["A"], ["B"]]})
+
+    def test_answer_must_be_one_listed_choice(self):
+        doc = {"options": {"A": {}, "B": {}}, "ground_truth": "A"}
+        for response in ("", "Answer: A or B", "Answer: C", "Answer: No valid option"):
+            with self.subTest(response=response):
+                self.assertEqual(judge_score(doc, [response]), {"score": 0.0, "extracted_predictions": [[]]})
+        self.assertEqual(judge_score(doc, ["Answer: $A$"])["score"], 1.0)
 
 
 class ChatHandler(BaseHTTPRequestHandler):

@@ -4,7 +4,10 @@
 Tools to run model inference and **Pass@1** scoring on the **KINA** benchmark. 
 **KINA** is an 899-item knowledge benchmark across 261 fine-grained disciplines. It provides a highly diagnostic evaluation of frontier LLMs with multi-discipline questions featuring **one correct** option among lettered choices **A–J** (as in the public [KINA.json](https://huggingface.co/datasets/2077AIDataFoundation/KINA) release).
 
-> Scoring reuses [lighteval](https://github.com/huggingface/lighteval) letter-extraction and Pass@*k* metrics (the same multi-choice path used for other letter-style tasks in the library). The **dataset file format** is the indexed JSON described below, not the legacy labeling-platform export.
+Scoring reads the last non-empty line of the answer for `Answer: X`, where
+`X` is one listed option letter. Reasoning text, abstentions, and ambiguous
+selections cannot supply a final answer. Each sample counts once toward the
+question's Pass@1 score.
   
 ## Environment setup
 
@@ -157,14 +160,17 @@ List of:
 {
     "id": 0,
     "score": 0.75,
-    "extracted_predictions": [["A", "A"], ["B", "B"]],
+    "extracted_predictions": [["A"], ["B"], ["A"], ["A"]],
     "gt": "A"
 }
 ```
 
 - `score`: Pass@1 in `[0, 1]`
-- `extracted_predictions`: one list of extracted letters per parallel sample
+- `extracted_predictions`: one list per sample, containing its final letter or empty if none was submitted
 - `gt`: `correct_answer` from the dataset
+
+To apply this scoring rule to existing raw responses, rerun with the original
+options and `--skip_inference`. This rewrites the scored JSON from the saved JSONL.
 
 ## Repository layout
 

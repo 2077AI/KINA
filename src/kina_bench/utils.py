@@ -1,30 +1,35 @@
 import json
 import logging
+import re
 from string import ascii_uppercase
 from typing import Any, Dict, List, Optional
 
-from lighteval.metrics.metrics import Metrics
-from lighteval.metrics.dynamic_metrics import multilingual_extractive_match_metric
-from lighteval.metrics.utils.extractive_match_utils import IndicesExtractionConfig
-from lighteval.utils.language import Language
-from lighteval.tasks.requests import Doc
-
 logger = logging.getLogger(__name__)
 
+KINA_SAMPLE_COUNTS = (1, 4, 8)
+FINAL_ANSWER = re.compile(r"Answer\s*[:：]\s*(.+)", re.IGNORECASE)
+LETTER_ANSWER = re.compile(r"([A-J])|\$([A-J])\$?", re.IGNORECASE)
+MARKDOWN_WRAPPER = re.compile(r"(\*\*|__|`)(.+)\1")
 
-_EXTRACTION_METRIC = multilingual_extractive_match_metric(
-    language=Language.ENGLISH,
-    gold_extraction_target=[IndicesExtractionConfig(prefix_for_extraction="NativeLetters")],
-    pred_extraction_target=[IndicesExtractionConfig(prefix_for_extraction="NativeLetters")],
-    precision=6,
-)
 
-# n parallel samples per question -> lighteval Pass@1 (compatible with A–J letter answers)
-KINA_METRICS = {
-    1: Metrics.gpqa_instruct_pass_at_1_1n.value,
-    4: Metrics.gpqa_instruct_pass_at_1_4n.value,
-    8: Metrics.gpqa_instruct_pass_at_1_8n.value,
-}
+def unwrap_markdown(text: str) -> str:
+    match = MARKDOWN_WRAPPER.fullmatch(text)
+    return match[2].strip() if match else text
+
+
+def extract_final_answer(response: str) -> str | None:
+    lines = response.rstrip().splitlines()
+    if not lines:
+        return None
+
+    final_line = unwrap_markdown(lines[-1].strip().removesuffix(".").rstrip())
+    answer = FINAL_ANSWER.fullmatch(final_line)
+    if answer is None:
+        return None
+
+    value = unwrap_markdown(answer[1].strip().removesuffix(".").rstrip())
+    letter = LETTER_ANSWER.fullmatch(value)
+    return (letter[1] or letter[2]).upper() if letter else None
 
 
 def _options_list_to_map(options: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -97,16 +102,6 @@ def load_data(file_path: str) -> List[Dict[str, Any]]:
     return parsed
 
 
-def get_kina_metric(n_sampling: int):
-    """Return the lighteval Pass@1 metric for n parallel completions (1, 4, or 8)."""
-    if n_sampling in KINA_METRICS:
-        return KINA_METRICS[n_sampling]
-    raise ValueError(
-        f"n_sampling={n_sampling} is not supported. "
-        f"Supported values are: {list(KINA_METRICS.keys())}."
-    )
-
-
 prompt_template = """Answer the following multiple choice question. There is only one correct answer. The last line of your response should be in the format 'Answer: $LETTER' (without quotes), where LETTER is one of A, B, C, D, E, F, G, H, I, or J. Think step by step before answering.
 Question:
 {question}
@@ -127,53 +122,17 @@ def get_messages(doc: Dict[str, Any]):
 
 
 def judge_score(metadata_doc: Dict, responses: List[str]):
-    """
-    Compute Pass@1 vs ground truth and extract predicted letters per response (A–J).
-
-    lighteval's PassAtK + extractive match overwrite `doc.specific["extracted_predictions"]`
-    on each inner call, so we run extraction once per response with a fresh Doc, same as before.
-    """
-    question = metadata_doc["question"]
+    """Score Pass@1 as the fraction of samples with the correct final answer."""
     options = metadata_doc["options"]
     ground_truth = metadata_doc["ground_truth"]
-
-    n_sampling = len(responses)
-    keys = sorted(options.keys())
-    choices = keys
     if ground_truth not in options:
-        raise ValueError(f"ground_truth {ground_truth!r} is not in options {keys}")
-    correct_index = keys.index(ground_truth)
+        raise ValueError(f"ground_truth {ground_truth!r} is not in options {sorted(options)}")
+    if len(responses) not in KINA_SAMPLE_COUNTS:
+        raise ValueError(f"Expected one of {KINA_SAMPLE_COUNTS} responses, got {len(responses)}")
 
-    doc_for_score = Doc(
-        query=question,
-        choices=choices,
-        gold_index=correct_index,
-        instruction=question,
-    )
-
-    metric = get_kina_metric(n_sampling)
-    result = metric.compute(
-        golds=[ground_truth],
-        predictions=responses,
-        formatted_doc=doc_for_score,
-    )
-    score = list(result.values())[0]
-
-    extracted_predictions: List[List[str]] = []
-    for resp in responses:
-        doc_for_extraction = Doc(
-            query=question,
-            choices=choices,
-            gold_index=correct_index,
-            instruction=question,
-        )
-        _EXTRACTION_METRIC.sample_level_fn([ground_truth], [resp], doc_for_extraction)
-        if doc_for_extraction.specific:
-            preds = doc_for_extraction.specific.get("extracted_predictions", [])
-            extracted_predictions.append(preds)
-        else:
-            extracted_predictions.append([])
-
+    predictions = [extract_final_answer(response) for response in responses]
+    score = predictions.count(ground_truth) / len(responses)
+    extracted_predictions = [[letter] if letter in options else [] for letter in predictions]
     return dict(score=score, extracted_predictions=extracted_predictions)
 
 

@@ -17,7 +17,7 @@ from tqdm.asyncio import tqdm_asyncio
 from kina_bench.config import PROJECT_ROOT
 from dotenv import find_dotenv, load_dotenv
 
-from kina_bench.utils import load_data, get_messages, judge_score, KINA_METRICS
+from kina_bench.utils import load_data, get_messages, judge_score, KINA_SAMPLE_COUNTS
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -200,8 +200,8 @@ async def main():
     args.token_limit = getattr(args, args.token_field)
     if args.token_limit is None:
         args.token_limit = 16384
-    if args.n_sampling not in KINA_METRICS:
-        parser.error(f"--n_sampling must be one of {sorted(KINA_METRICS)}")
+    if args.n_sampling not in KINA_SAMPLE_COUNTS:
+        parser.error(f"--n_sampling must be one of {list(KINA_SAMPLE_COUNTS)}")
     if min(args.token_limit, args.n_thread, args.timeout) <= 0 or (args.limit is not None and args.limit <= 0):
         parser.error("Token limit, --n_thread, --timeout and --limit must be positive")
     if not math.isfinite(args.requests_per_second) or args.requests_per_second <= 0:
@@ -302,16 +302,11 @@ async def main():
         return
 
     final_data = []
-    for doc in tqdm(finished_data, desc="lighteval evaluation"):
+    for doc in tqdm(finished_data, desc="KINA scoring"):
         doc_id = doc["id"]
         gt = doc["metadata"]["ground_truth"]
 
-        responses = []
-        for resp in doc["responses"]:
-            if resp.get("content") is not None:
-                responses.append(resp["content"])
-            else:
-                responses.append(resp["reasoning"])
+        responses = [resp.get("content") or "" for resp in doc["responses"]]
 
         score_dict = judge_score(metadata_doc=doc["metadata"], responses=responses)
 
